@@ -132,20 +132,40 @@ class ActionDispatcher:
             print(f"[ActionDispatcher] Dispatch error for {gesture_token}: {e}")
             return False
 
-    def set_pinch_state(self, is_pinched: bool):
+    def set_pinch_state(self, is_pinched: bool) -> Optional[str]:
         """
         Maintains mouse button down / up state for click and drag.
+        Returns a descriptive event string on state change.
         """
+        now = time.perf_counter()
         if self.mock_mode:
-            self.is_mouse_down = is_pinched
-            return
+            if is_pinched != self.is_mouse_down:
+                self.is_mouse_down = is_pinched
+                event = "PINCH (Mouse Left Down)" if is_pinched else "PINCH (Mouse Left Up)"
+                self.dispatched_actions.append((event, now))
+                return event
+            return None
 
         if is_pinched and not self.is_mouse_down:
-            self.mouse.press(Button.left)
+            try:
+                self.mouse.press(Button.left)
+            except Exception as e:
+                print(f"[ActionDispatcher] Mouse press error: {e}")
             self.is_mouse_down = True
+            event = "PINCH (Mouse Left Down)"
+            self.dispatched_actions.append((event, now))
+            return event
         elif not is_pinched and self.is_mouse_down:
-            self.mouse.release(Button.left)
+            try:
+                self.mouse.release(Button.left)
+            except Exception as e:
+                print(f"[ActionDispatcher] Mouse release error: {e}")
             self.is_mouse_down = False
+            event = "PINCH (Mouse Left Up)"
+            self.dispatched_actions.append((event, now))
+            return event
+
+        return None
 
     def move_cursor_norm(self, norm_x: float, norm_y: float):
         """

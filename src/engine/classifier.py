@@ -59,7 +59,7 @@ class PoseClassifier:
 
     def classify_geometric(self, landmarks_21x3: np.ndarray) -> Tuple[Optional[str], float]:
         """
-        Classifies pose based on anatomical joint distance ratios from wrist P0.
+        Classifies pose based on anatomical joint distance ratios from wrist P0 and MCP joints.
         Completely rotation-, scale-, and translation-invariant.
         """
         if landmarks_21x3 is None or len(landmarks_21x3) != 21:
@@ -72,19 +72,28 @@ class PoseClassifier:
 
         d = lambda a, b: float(np.linalg.norm(lm[a] - lm[b]))
 
-        # A finger is extended if tip is farther from wrist P0 than PIP joint is
-        index_open = d(8, 0) > (d(6, 0) * 1.05)
-        middle_open = d(12, 0) > (d(10, 0) * 1.05)
-        ring_open = d(16, 0) > (d(14, 0) * 1.05)
-        pinky_open = d(20, 0) > (d(18, 0) * 1.05)
+        # Anatomical finger openness:
+        # A finger is open if its tip is extended relative to both wrist P0 and its MCP joint
+        # Tips: 8 (index), 12 (middle), 16 (ring), 20 (pinky)
+        # PIPs: 6, 10, 14, 18
+        # MCPs: 5, 9, 13, 17
+        index_open = (d(8, 0) > d(6, 0) * 0.98) and (d(8, 5) > d(6, 5) * 0.95)
+        middle_open = (d(12, 0) > d(10, 0) * 0.98) and (d(12, 9) > d(10, 9) * 0.95)
+        ring_open = (d(16, 0) > d(14, 0) * 0.98) and (d(16, 13) > d(14, 13) * 0.95)
+        pinky_open = (d(20, 0) > d(18, 0) * 0.98) and (d(20, 17) > d(18, 17) * 0.95)
 
-        # Thumb analysis
+        curled_fingers = [not index_open, not middle_open, not ring_open, not pinky_open]
+        curled_count = sum(curled_fingers)
+
+        # Thumb analysis:
+        # In Thumbs Up: Thumb points away from wrist (thumb_dist_p0 > 0.60)
+        # In a Fist: Thumb is curled/tucked close to palm/wrist (thumb_dist_p0 <= 0.60)
         thumb_dist_p0 = d(4, 0) / palm_span
-        thumb_open = thumb_dist_p0 > 0.60
+        thumb_extended = thumb_dist_p0 > 0.60
 
-        # Pinch touch between thumb tip (4) and index tip (8)
+        # Touch between thumb tip (4) and index tip (8)
         d_thumb_index = d(4, 8) / palm_span
-        is_touching = d_thumb_index < 0.28
+        is_touching = d_thumb_index < 0.35
 
         # 1. OK Sign: Thumb and index tips touch; middle or ring is extended
         if is_touching and (middle_open or ring_open):
@@ -102,13 +111,12 @@ class PoseClassifier:
         if index_open and not middle_open and not ring_open and not pinky_open:
             return "POSE_POINTING", 0.96
 
-        # 5. Thumbs Up: Thumb extended, all other 4 fingers curled
-        if thumb_open and not index_open and not middle_open and not ring_open and not pinky_open:
-            return "POSE_THUMBS_UP", 0.94
-
-        # 6. Fist: All 4 main fingers curled, thumb not fully extended
-        if not index_open and not middle_open and not ring_open and not pinky_open:
-            return "POSE_FIST", 0.95
+        # 5. Thumbs Up vs Fist when at least 3 main fingers are curled:
+        if curled_count >= 3:
+            if thumb_extended and not index_open and not middle_open:
+                return "POSE_THUMBS_UP", 0.94
+            else:
+                return "POSE_FIST", 0.96
 
         return None, 0.0
 

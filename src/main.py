@@ -138,7 +138,7 @@ class PipelineWorker(threading.Thread):
                     # Palm normal & self-occlusion check (|nz| >= min_palm_normal_z)
                     _, is_palm_valid = self.app.normalizer.compute_palm_normal(landmarks_3d)
 
-                    # Pinch Hysteresis with 2D + 3D consensus
+                    # Pinch Hysteresis with 2D + 3D consensus (robust thresholds: engage 0.35, release 0.45)
                     d_pinch_3d = self.app.normalizer.compute_pinch_distance(norm_lm)
                     p4_2d = hand.landmarks_norm[4][:2]
                     p8_2d = hand.landmarks_norm[8][:2]
@@ -147,10 +147,12 @@ class PipelineWorker(threading.Thread):
                     d_pinch = min(d_pinch_3d, d_pinch_2d)
 
                     new_pinch = self.app.pinch_filter.update(d_pinch, is_palm_valid=is_palm_valid)
-
                     if new_pinch != is_pinched:
-                        self.app.action_dispatcher.set_pinch_state(new_pinch)
+                        pinch_event = self.app.action_dispatcher.set_pinch_state(new_pinch)
                         is_pinched = new_pinch
+                        if pinch_event:
+                            print(f"[ACTION DISPATCHED] {pinch_event}")
+                            event_to_dispatch = pinch_event
 
                     # Hybrid Static Pose Classification (Geometric rules + ONNX Runtime MLP)
                     classified_pose, confidence = self.app.classifier.predict(feat_63d, raw_landmarks=landmarks_3d)
@@ -160,28 +162,35 @@ class PipelineWorker(threading.Thread):
                     # Dynamic Swipe Trajectory (12-Frame Circular Deque)
                     swipe_token = self.app.swipe_detector.add_point(wrist_norm[0], wrist_norm[1], capture_timestamp)
 
-                    # Prioritize dynamic swipes over static poses
-                    candidate_token = swipe_token or classified_pose
-                    detected_pose = candidate_token
+                    # Active gesture resolution: Pinch takes precedence when down
+                    if is_pinched:
+                        detected_pose = "PINCH"
+                        candidate_token = None
+                    else:
+                        candidate_token = swipe_token or classified_pose
+                        detected_pose = candidate_token
 
                     # Debounce FSM Evaluation (Direct Mode bypasses clutch requirement)
-                    fsm_state, event_to_dispatch = self.app.fsm.update(
+                    fsm_state, fsm_event = self.app.fsm.update(
                         candidate_token,
                         capture_timestamp,
                         force_armed=self.app.direct_mode,
                     )
                     current_fsm_state = fsm_state.name
 
-                    if event_to_dispatch:
-                        print(f"[GESTURE TRIGGERED] {event_to_dispatch} -> Dispatching OS action!")
-                        self.app.action_dispatcher.dispatch_gesture(event_to_dispatch)
+                    if fsm_event:
+                        print(f"[GESTURE TRIGGERED] {fsm_event} -> Dispatching OS action!")
+                        self.app.action_dispatcher.dispatch_gesture(fsm_event)
+                        event_to_dispatch = fsm_event
 
-                    # Precision Pointer Tracking
+                    # Precision Pointer Tracking: Active during POSE_POINTING or PINCH drag
                     screen_norm_x, screen_norm_y = self.app.roi_gate.map_to_screen_norm(index_norm[0], index_norm[1], mirror_x=False)
                     smooth_x, smooth_y = self.app.cursor_filter.filter((screen_norm_x, screen_norm_y))
 
-                    if self.app.direct_mode or self.app.fsm.is_active() or classified_pose == "POSE_POINTING":
+                    if (classified_pose == "POSE_POINTING") or is_pinched:
                         self.app.action_dispatcher.move_cursor_norm(smooth_x, smooth_y)
+                    else:
+                        self.app.cursor_filter.reset()
 
                 else:
                     self.app.cursor_filter.reset()

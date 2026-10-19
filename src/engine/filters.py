@@ -16,19 +16,20 @@ class PinchHysteresis:
       - Holds previous state when between thresholds to eliminate click chatter.
     """
 
-    def __init__(self, tau_engage: float = 0.22, tau_release: float = 0.30):
+    def __init__(self, tau_engage: float = 0.35, tau_release: float = 0.45):
         self.tau_engage = tau_engage
         self.tau_release = tau_release
         self.is_pinched = False
 
     def update(self, d_pinch: float, is_palm_valid: bool = True) -> bool:
         """
-        Updates hysteresis state.
-        If palm orientation is invalid (e.g. edge-on rotation), pinch evaluation is paused.
+        Updates hysteresis state:
+          - Engages when d_pinch < tau_engage (default 0.35)
+          - Releases when d_pinch > tau_release (default 0.45)
+          - Maintains state between thresholds to eliminate click chatter.
+          - Pauses evaluation when is_palm_valid is False (severe edge-on self-occlusion).
         """
         if not is_palm_valid:
-            # Pause static pinch evaluation; if currently pinched, preserve or safely release?
-            # Specification: "If |n_hat_z| drops below 0.35, static pinch evaluation pauses automatically."
             return self.is_pinched
 
         if not self.is_pinched:

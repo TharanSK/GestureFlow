@@ -19,11 +19,11 @@ vision:
 
 normalizer:
   epsilon: 1.0e-6
-  min_palm_normal_z: 0.35
+  min_palm_normal_z: 0.15
 
 hysteresis:
-  pinch_engage_threshold: 0.22
-  pinch_release_threshold: 0.30
+  pinch_engage_threshold: 0.35
+  pinch_release_threshold: 0.45
 
 cursor:
   alpha_min: 0.15
@@ -37,7 +37,7 @@ swipe:
 
 fsm:
   clutch_hold_time_ms: 400
-  trigger_consecutive_frames: 3
+  trigger_consecutive_frames: 2
   cooldown_lock_ms: 350
 
 classifier:
