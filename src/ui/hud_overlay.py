@@ -90,10 +90,12 @@ class VideoHUDWidget(QWidget):
         self.current_pixmap: Optional[QPixmap] = None
 
     def update_frame(self, bgr_image: np.ndarray):
+        if bgr_image is None or bgr_image.size == 0:
+            return
         h, w, ch = bgr_image.shape
         bytes_per_line = ch * w
-        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-        qt_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        rgb_image = np.ascontiguousarray(cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB))
+        qt_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         self.current_pixmap = QPixmap.fromImage(qt_img)
         self.update()
 
@@ -288,6 +290,14 @@ class HUDOverlayWindow(QMainWindow):
         self.setWindowTitle("GestureFlow - Gesture Monitor & Telemetry Dashboard")
         self.resize(1020, 560)
         self.setStyleSheet("QMainWindow { background-color: #121218; }")
+
+        # Center on primary screen
+        screen = QApplication.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            x = max(20, (geom.width() - 1020) // 2)
+            y = max(20, (geom.height() - 560) // 2)
+            self.move(x, y)
 
         # Floating Mini Widget
         self.floating_widget = FloatingGestureWidget()

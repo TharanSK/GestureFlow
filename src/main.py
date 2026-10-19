@@ -1,19 +1,19 @@
 """
 GestureFlow - Main Application Coordinator.
 Orchestrates the 4-stage pipeline:
-  Stage 1: CameraProducer Thread
-  Stage 2: Vision Landmarker Worker
-  Stage 3: Gesture Engine & Debounce FSM Evaluator
-  Stage 4: OS Input Dispatcher & PyQt6 System Tray Consumer
+  Stage 1: CameraProducer Thread (OpenCV 640x480 @ 60 FPS, bounded queue maxsize=1)
+  Stage 2: Vision Landmarker Worker (MediaPipe Hands 3D, background thread)
+  Stage 3: Gesture Engine & Debounce FSM Evaluator (ONNX MLP + 12-Frame Deque)
+  Stage 4: OS Input Dispatcher & PyQt6 System Tray Consumer (Main UI thread)
 """
 
 import sys
 import os
 import time
 import argparse
+import threading
 from pathlib import Path
-from typing import Optional
-from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
 
 # Ensure project root is in sys.path so 'src' resolves regardless of invocation directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -49,9 +49,167 @@ def load_settings(settings_path: str = "config/settings.yaml") -> dict:
     return {}
 
 
+class PipelineWorker(threading.Thread):
+    """
+    Dedicated worker thread handling Stage 2 (Vision Inference) and Stage 3 (Evaluator/FSM)
+    along with OS dispatch. Completely decouples heavy MediaPipe CPU inference from the
+    PyQt6 GUI event loop to ensure zero UI stalls.
+    """
+
+    def __init__(self, app: "GestureFlowApp"):
+        super().__init__(daemon=True, name="PipelineWorkerThread")
+        self.app = app
+        self._running = False
+        self._lock = threading.Lock()
+
+        # Shared state for GUI Consumer (Stage 4)
+        self.latest_display_frame: Optional[np.ndarray] = None
+        self.latest_telemetry: Dict[str, Any] = {
+            "current_gesture": None,
+            "fsm_state": "IDLE",
+            "clutch_progress": 0.0,
+            "is_pinched": False,
+            "fps": 0.0,
+            "latency_ms": 0.0,
+            "latest_event": None,
+        }
+
+    def start_worker(self):
+        self._running = True
+        self.start()
+
+    def stop_worker(self):
+        self._running = False
+        if self.is_alive():
+            self.join(timeout=1.0)
+
+    def get_latest_data(self) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+        with self._lock:
+            frame = self.latest_display_frame
+            telemetry = self.latest_telemetry.copy()
+            # Clear latest_event after reading so log entries don't duplicate
+            self.latest_telemetry["latest_event"] = None
+            return frame, telemetry
+
+    def run(self):
+        print("[GestureFlow] Pipeline worker thread running...")
+        while self._running:
+            # 1. Fetch latest frame from Producer (Stage 1)
+            frame, capture_timestamp = self.app.camera_stream.get_frame(timeout=0.03)
+            if frame is None:
+                continue
+
+            frame_mirrored = cv2.flip(frame, 1)
+
+            # 2. Vision Inference: MediaPipe Hands (Stage 2)
+            tracking_result = self.app.hand_tracker.process_frame(frame_mirrored)
+            hand_present = tracking_result.has_landmarks and tracking_result.primary_hand is not None
+
+            # Signal presence for idle sleep power throttling (60 FPS -> 2 FPS after 5s)
+            self.app.camera_stream.signal_hand_presence(hand_present)
+
+            detected_pose: Optional[str] = None
+            event_to_dispatch: Optional[str] = None
+            current_fsm_state = self.app.fsm.state.name
+            is_pinched = self.app.pinch_filter.is_pinched
+            pixel_landmarks = None
+
+            if hand_present and not self.app.is_paused:
+                hand = tracking_result.primary_hand
+                pixel_landmarks = hand.pixel_landmarks
+                wrist_norm = hand.landmarks_norm[0]
+                index_norm = hand.landmarks_norm[8]
+
+                # Central 60% ROI Check ("Midas Touch" defense)
+                in_roi = self.app.roi_gate.is_inside(wrist_norm[0], wrist_norm[1]) or self.app.roi_gate.is_inside(index_norm[0], index_norm[1])
+
+                if in_roi:
+                    # Stage 3: Feature Normalization & Mathematics
+                    landmarks_3d = hand.world_landmarks
+                    norm_lm, feat_63d, _ = self.app.normalizer.normalize(landmarks_3d)
+
+                    # Palm normal & self-occlusion check (|nz| >= 0.35)
+                    _, is_palm_valid = self.app.normalizer.compute_palm_normal(landmarks_3d)
+
+                    # Pinch Hysteresis (tau_engage=0.22, tau_release=0.30)
+                    d_pinch = self.app.normalizer.compute_pinch_distance(norm_lm)
+                    new_pinch = self.app.pinch_filter.update(d_pinch, is_palm_valid=is_palm_valid)
+
+                    if new_pinch != is_pinched:
+                        self.app.action_dispatcher.set_pinch_state(new_pinch)
+                        is_pinched = new_pinch
+
+                    # Static Pose Classification (ONNX Runtime MLP)
+                    classified_pose, confidence = self.app.classifier.predict(feat_63d)
+
+                    # Dynamic Swipe Trajectory (12-Frame Circular Deque)
+                    swipe_token = self.app.swipe_detector.add_point(wrist_norm[0], wrist_norm[1], capture_timestamp)
+
+                    # Candidate selection
+                    candidate_token = swipe_token or classified_pose
+                    detected_pose = candidate_token
+
+                    # Debounce FSM Evaluation
+                    fsm_state, event_to_dispatch = self.app.fsm.update(candidate_token, capture_timestamp)
+                    current_fsm_state = fsm_state.name
+
+                    if event_to_dispatch:
+                        print(f"[GestureFlow] Validated Gesture Triggered: {event_to_dispatch}")
+                        self.app.action_dispatcher.dispatch_gesture(event_to_dispatch)
+
+                    # Precision Pointer Tracking
+                    screen_norm_x, screen_norm_y = self.app.roi_gate.map_to_screen_norm(index_norm[0], index_norm[1], mirror_x=False)
+                    smooth_x, smooth_y = self.app.cursor_filter.filter((screen_norm_x, screen_norm_y))
+
+                    if self.app.fsm.is_active() or classified_pose == "POSE_POINTING":
+                        self.app.action_dispatcher.move_cursor_norm(smooth_x, smooth_y)
+
+                else:
+                    self.app.cursor_filter.reset()
+                    self.app.swipe_detector.reset()
+                    self.app.fsm.update(None, capture_timestamp)
+
+            else:
+                self.app.cursor_filter.reset()
+                self.app.swipe_detector.reset()
+                self.app.fsm.update(None, capture_timestamp)
+
+            # End-to-end telemetry calculation
+            e2e_latency_ms = (time.perf_counter() - capture_timestamp) * 1000.0
+
+            # Render skeleton bones and ROI onto the frame if HUD is active
+            if self.app.hud_window:
+                roi_box = (self.app.roi_x_min, self.app.roi_x_max, self.app.roi_y_min, self.app.roi_y_max)
+                annotated = self.app.hud_window.draw_telemetry_on_frame(
+                    frame=frame_mirrored,
+                    pixel_landmarks=pixel_landmarks,
+                    roi_box=roi_box,
+                    fps=self.app.camera_stream.current_fps,
+                    latency_ms=e2e_latency_ms,
+                    fsm_state=current_fsm_state,
+                    current_gesture=detected_pose,
+                    is_pinched=is_pinched,
+                    is_sleeping=self.app.camera_stream.is_sleeping,
+                )
+            else:
+                annotated = frame_mirrored
+
+            # Store latest frame & telemetry in atomic thread-safe slot
+            with self._lock:
+                self.latest_display_frame = annotated
+                self.latest_telemetry["current_gesture"] = detected_pose
+                self.latest_telemetry["fsm_state"] = current_fsm_state
+                self.latest_telemetry["clutch_progress"] = self.app.fsm.clutch_progress
+                self.latest_telemetry["is_pinched"] = is_pinched
+                self.latest_telemetry["fps"] = self.app.camera_stream.current_fps
+                self.latest_telemetry["latency_ms"] = e2e_latency_ms
+                if event_to_dispatch:
+                    self.latest_telemetry["latest_event"] = event_to_dispatch
+
+
 class GestureFlowApp:
     """
-    Main application engine running the pipeline loop and integrating with PyQt6.
+    Main application engine coordinating the 4-stage pipeline and managing the PyQt6 UI.
     """
 
     def __init__(self, settings_path: str = "config/settings.yaml", keymaps_path: str = "config/default_keymaps.json", headless: bool = False):
@@ -127,16 +285,22 @@ class GestureFlowApp:
         # Stage 4: Consumer
         self.action_dispatcher = ActionDispatcher(keymaps_path=keymaps_path)
 
-        # UI
+        # UI & Worker
         self.hud_window: Optional[HUDOverlayWindow] = None
         self.tray_manager: Optional[SystemTrayManager] = None
         self.timer: Optional[QTimer] = None
+        self.worker: Optional[PipelineWorker] = None
 
     def start(self):
-        print("[GestureFlow] Starting Camera Producer Stage 1...")
+        print("[GestureFlow] Starting Camera Producer (Stage 1)...")
         self.camera_stream.start()
 
+        print("[GestureFlow] Starting Vision & Evaluator Worker (Stage 2 & 3)...")
+        self.worker = PipelineWorker(self)
+        self.worker.start_worker()
+
         if not self.headless:
+            print("[GestureFlow] Initializing Gesture Dashboard Window (Stage 4)...")
             self.hud_window = HUDOverlayWindow()
             self.tray_manager = SystemTrayManager()
 
@@ -147,12 +311,16 @@ class GestureFlowApp:
             self.tray_manager.reload_keymaps_requested.connect(self.action_dispatcher.load_keymaps)
             self.tray_manager.exit_requested.connect(self.shutdown)
 
+            # Display window and bring to front
             self.hud_window.show()
+            self.hud_window.raise_()
+            self.hud_window.activateWindow()
+            print("[GestureFlow] Dashboard window is now visible on screen.")
 
-            # Qt high-frequency tick timer (1 ms interval for lowest latency)
+            # Non-blocking 30 FPS UI refresh timer (33ms)
             self.timer = QTimer()
-            self.timer.timeout.connect(self.process_pipeline_tick)
-            self.timer.start(1)
+            self.timer.timeout.connect(self._ui_tick)
+            self.timer.start(33)
 
     def _toggle_hud(self):
         if self.hud_window:
@@ -160,6 +328,8 @@ class GestureFlowApp:
                 self.hud_window.hide()
             else:
                 self.hud_window.show()
+                self.hud_window.raise_()
+                self.hud_window.activateWindow()
 
     def _toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -167,129 +337,36 @@ class GestureFlowApp:
             self.tray_manager.set_paused_status(self.is_paused)
         print(f"[GestureFlow] Gestures {'PAUSED' if self.is_paused else 'RESUMED'}")
 
-    def process_pipeline_tick(self):
+    def _ui_tick(self):
         """
-        Single tick of the pipeline: receives frame from bounded queue, runs vision inference,
-        evaluates heuristics/FSM, dispatches OS actions, and updates HUD display.
+        Non-blocking UI refresh loop running on the Qt thread.
+        Simply reads the latest rendered frame and telemetry from the background worker.
         """
-        frame, capture_timestamp = self.camera_stream.get_frame(timeout=0.005)
-        if frame is None:
+        if not self.worker or not self.hud_window:
             return
 
-        now = time.perf_counter()
-        # Flip horizontally for natural mirror behavior
-        frame_mirrored = cv2.flip(frame, 1)
+        frame, telemetry = self.worker.get_latest_data()
 
-        # Stage 2: Hand Landmark Tracking
-        tracking_result = self.hand_tracker.process_frame(frame_mirrored)
-        hand_present = tracking_result.has_landmarks and tracking_result.primary_hand is not None
+        if frame is not None and self.hud_window.isVisible():
+            self.hud_window.update_display(frame)
 
-        # Signal presence to CameraStream for idle sleep throttling
-        self.camera_stream.signal_hand_presence(hand_present)
-
-        detected_pose: Optional[str] = None
-        event_to_dispatch: Optional[str] = None
-        current_fsm_state = self.fsm.state.name
-        is_pinched = self.pinch_filter.is_pinched
-        pixel_landmarks = None
-
-        if hand_present and not self.is_paused:
-            hand = tracking_result.primary_hand
-            pixel_landmarks = hand.pixel_landmarks
-            wrist_norm = hand.landmarks_norm[0]  # Wrist (x, y, z)
-            index_norm = hand.landmarks_norm[8]  # Index tip (x, y, z)
-
-            # Central 60% ROI Check ("Midas Touch" defense)
-            in_roi = self.roi_gate.is_inside(wrist_norm[0], wrist_norm[1]) or self.roi_gate.is_inside(index_norm[0], index_norm[1])
-
-            if in_roi:
-                # Stage 3: Feature Engineering & Normalization
-                landmarks_3d = hand.world_landmarks
-                norm_lm, feat_63d, _ = self.normalizer.normalize(landmarks_3d)
-
-                # Palm normal & self-occlusion check
-                _, is_palm_valid = self.normalizer.compute_palm_normal(landmarks_3d)
-
-                # Static Pinch Distance & Hysteresis
-                d_pinch = self.normalizer.compute_pinch_distance(norm_lm)
-                new_pinch = self.pinch_filter.update(d_pinch, is_palm_valid=is_palm_valid)
-
-                if new_pinch != is_pinched:
-                    self.action_dispatcher.set_pinch_state(new_pinch)
-                    is_pinched = new_pinch
-
-                # Static Pose Classification (ONNX MLP)
-                classified_pose, confidence = self.classifier.predict(feat_63d)
-
-                # Dynamic Swipe Trajectory (12-Frame Deque)
-                swipe_token = self.swipe_detector.add_point(wrist_norm[0], wrist_norm[1], capture_timestamp)
-
-                # Prioritize dynamic swipe over static pose
-                candidate_token = swipe_token or classified_pose
-                detected_pose = candidate_token
-
-                # Debounce Finite State Machine Evaluation
-                fsm_state, event_to_dispatch = self.fsm.update(candidate_token, capture_timestamp)
-                current_fsm_state = fsm_state.name
-
-                if event_to_dispatch:
-                    print(f"[GestureFlow] Dispatching Validated Gesture: {event_to_dispatch}")
-                    self.action_dispatcher.dispatch_gesture(event_to_dispatch)
-
-                # Precision Pointer Cursor Tracking
-                # Map index fingertip to screen
-                screen_norm_x, screen_norm_y = self.roi_gate.map_to_screen_norm(index_norm[0], index_norm[1], mirror_x=False)
-                smooth_x, smooth_y = self.cursor_filter.filter((screen_norm_x, screen_norm_y))
-
-                # Allow cursor positioning when system is ARMED or when pointing pose is active
-                if self.fsm.is_active() or classified_pose == "POSE_POINTING":
-                    self.action_dispatcher.move_cursor_norm(smooth_x, smooth_y)
-
-            else:
-                # Outside active ROI: reset transient filters
-                self.cursor_filter.reset()
-                self.swipe_detector.reset()
-                self.fsm.update(None, capture_timestamp)
-
-        else:
-            # No hand in frame
-            self.cursor_filter.reset()
-            self.swipe_detector.reset()
-            self.fsm.update(None, capture_timestamp)
-
-        # Stage 4: HUD Overlay Visualization & Gesture Display
-        if self.hud_window:
-            e2e_latency_ms = (time.perf_counter() - capture_timestamp) * 1000.0
-            if self.hud_window.isVisible():
-                roi_box = (self.roi_x_min, self.roi_x_max, self.roi_y_min, self.roi_y_max)
-                annotated = self.hud_window.draw_telemetry_on_frame(
-                    frame=frame_mirrored,
-                    pixel_landmarks=pixel_landmarks,
-                    roi_box=roi_box,
-                    fps=self.camera_stream.current_fps,
-                    latency_ms=e2e_latency_ms,
-                    fsm_state=current_fsm_state,
-                    current_gesture=detected_pose,
-                    is_pinched=is_pinched,
-                    is_sleeping=self.camera_stream.is_sleeping,
-                )
-                self.hud_window.update_display(annotated)
-
-            # Update the rich gesture dashboard & floating mini-HUD
+        if telemetry:
             self.hud_window.update_gesture_dashboard(
-                current_gesture=detected_pose,
-                fsm_state=current_fsm_state,
-                clutch_progress=self.fsm.clutch_progress,
-                is_pinched=is_pinched,
-                fps=self.camera_stream.current_fps,
-                latency_ms=e2e_latency_ms,
-                latest_event=event_to_dispatch,
+                current_gesture=telemetry.get("current_gesture"),
+                fsm_state=telemetry.get("fsm_state", "IDLE"),
+                clutch_progress=telemetry.get("clutch_progress", 0.0),
+                is_pinched=telemetry.get("is_pinched", False),
+                fps=telemetry.get("fps", 0.0),
+                latency_ms=telemetry.get("latency_ms", 0.0),
+                latest_event=telemetry.get("latest_event"),
             )
 
     def shutdown(self):
         print("[GestureFlow] Shutting down...")
         if self.timer:
             self.timer.stop()
+        if self.worker:
+            self.worker.stop_worker()
         self.camera_stream.stop()
         self.action_dispatcher.cleanup()
         self.hand_tracker.close()
