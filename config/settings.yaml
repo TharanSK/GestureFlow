@@ -1,0 +1,51 @@
+camera:
+  device_index: 0
+  width: 640
+  height: 480
+  target_fps: 60
+  idle_fps: 2
+  idle_timeout_seconds: 5.0
+
+vision:
+  static_image_mode: false
+  max_num_hands: 1
+  min_detection_confidence: 0.70
+  min_tracking_confidence: 0.70
+  roi:
+    x_min: 0.20
+    x_max: 0.80
+    y_min: 0.20
+    y_max: 0.80
+
+normalizer:
+  epsilon: 1.0e-6
+  min_palm_normal_z: 0.35
+
+hysteresis:
+  pinch_engage_threshold: 0.22
+  pinch_release_threshold: 0.30
+
+cursor:
+  alpha_min: 0.15
+  beta: 4.5
+  deadzone_pixels: 1.5
+
+swipe:
+  buffer_size: 12
+  min_velocity: 0.35
+  min_cosine_similarity: 0.85
+
+fsm:
+  clutch_hold_time_ms: 400
+  trigger_consecutive_frames: 3
+  cooldown_lock_ms: 350
+
+classifier:
+  model_path: "data/models/pose_classifier.onnx"
+  min_probability: 0.85
+
+ui:
+  show_hud: true
+  hud_opacity: 0.85
+  skeleton_color: [0, 255, 128]
+  roi_color: [255, 165, 0]

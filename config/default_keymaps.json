@@ -1,0 +1,57 @@
+{
+  "gestures": {
+    "PINCH": {
+      "action": "mouse_click",
+      "button": "left",
+      "description": "Left mouse click / click and drag"
+    },
+    "SWIPE_LEFT": {
+      "action": "hotkey",
+      "keys": ["ctrl", "right"],
+      "description": "Next virtual desktop / Next slide"
+    },
+    "SWIPE_RIGHT": {
+      "action": "hotkey",
+      "keys": ["ctrl", "left"],
+      "description": "Previous virtual desktop / Previous slide"
+    },
+    "SWIPE_UP": {
+      "action": "hotkey",
+      "keys": ["volume_up"],
+      "description": "Volume Up"
+    },
+    "SWIPE_DOWN": {
+      "action": "hotkey",
+      "keys": ["volume_down"],
+      "description": "Volume Down"
+    },
+    "POSE_OPEN_PALM": {
+      "action": "clutch",
+      "description": "Wake / Clutch pose"
+    },
+    "POSE_FIST": {
+      "action": "media_key",
+      "key": "play_pause",
+      "description": "Play / Pause Media"
+    },
+    "POSE_PEACE": {
+      "action": "media_key",
+      "key": "volume_mute",
+      "description": "Mute Audio"
+    },
+    "POSE_THUMBS_UP": {
+      "action": "hotkey",
+      "keys": ["win", "shift", "s"],
+      "description": "Windows Snipping Tool (Screenshot)"
+    },
+    "POSE_POINTING": {
+      "action": "pointer_mode",
+      "description": "Enable precision pointer mode"
+    },
+    "POSE_OK": {
+      "action": "hotkey",
+      "keys": ["alt", "tab"],
+      "description": "App Switcher"
+    }
+  }
+}
