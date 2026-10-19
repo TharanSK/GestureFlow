@@ -26,6 +26,11 @@ class PoseClassifier:
 
     def __init__(self, model_path: str = "data/models/pose_classifier.onnx", min_probability: float = 0.85):
         self.model_path = Path(model_path)
+        if not self.model_path.is_absolute() and not self.model_path.exists():
+            candidate = Path(__file__).resolve().parent.parent.parent / self.model_path
+            if candidate.exists():
+                self.model_path = candidate
+
         self.min_probability = min_probability
         self.session: Optional[ort.InferenceSession] = None
         self.input_name: str = "float_input"

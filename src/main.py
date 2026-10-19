@@ -13,6 +13,13 @@ import time
 import argparse
 from pathlib import Path
 from typing import Optional
+from pathlib import Path
+
+# Ensure project root is in sys.path so 'src' resolves regardless of invocation directory
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import yaml
 import numpy as np
 import cv2
@@ -34,6 +41,8 @@ from src.ui.hud_overlay import HUDOverlayWindow, SystemTrayManager
 
 def load_settings(settings_path: str = "config/settings.yaml") -> dict:
     p = Path(settings_path)
+    if not p.is_absolute() and not p.exists():
+        p = PROJECT_ROOT / settings_path
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}

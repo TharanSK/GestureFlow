@@ -51,6 +51,11 @@ class ActionDispatcher:
 
     def __init__(self, keymaps_path: str = "config/default_keymaps.json", mock_mode: bool = False):
         self.keymaps_path = Path(keymaps_path)
+        if not self.keymaps_path.is_absolute() and not self.keymaps_path.exists():
+            candidate = Path(__file__).resolve().parent.parent.parent / self.keymaps_path
+            if candidate.exists():
+                self.keymaps_path = candidate
+
         self.mock_mode = mock_mode
         self.keymaps: Dict[str, Any] = {}
 
