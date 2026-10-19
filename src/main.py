@@ -142,6 +142,7 @@ class GestureFlowApp:
 
             # Wire tray signals
             self.tray_manager.toggle_hud_requested.connect(self._toggle_hud)
+            self.tray_manager.toggle_floating_requested.connect(self.hud_window._toggle_floating_widget)
             self.tray_manager.pause_resume_requested.connect(self._toggle_pause)
             self.tray_manager.reload_keymaps_requested.connect(self.action_dispatcher.load_keymaps)
             self.tray_manager.exit_requested.connect(self.shutdown)
@@ -187,6 +188,7 @@ class GestureFlowApp:
         self.camera_stream.signal_hand_presence(hand_present)
 
         detected_pose: Optional[str] = None
+        event_to_dispatch: Optional[str] = None
         current_fsm_state = self.fsm.state.name
         is_pinched = self.pinch_filter.is_pinched
         pixel_landmarks = None
@@ -255,22 +257,34 @@ class GestureFlowApp:
             self.swipe_detector.reset()
             self.fsm.update(None, capture_timestamp)
 
-        # Stage 4: HUD Overlay Visualization
-        if self.hud_window and self.hud_window.isVisible():
+        # Stage 4: HUD Overlay Visualization & Gesture Display
+        if self.hud_window:
             e2e_latency_ms = (time.perf_counter() - capture_timestamp) * 1000.0
-            roi_box = (self.roi_x_min, self.roi_x_max, self.roi_y_min, self.roi_y_max)
-            annotated = self.hud_window.draw_telemetry_on_frame(
-                frame=frame_mirrored,
-                pixel_landmarks=pixel_landmarks,
-                roi_box=roi_box,
+            if self.hud_window.isVisible():
+                roi_box = (self.roi_x_min, self.roi_x_max, self.roi_y_min, self.roi_y_max)
+                annotated = self.hud_window.draw_telemetry_on_frame(
+                    frame=frame_mirrored,
+                    pixel_landmarks=pixel_landmarks,
+                    roi_box=roi_box,
+                    fps=self.camera_stream.current_fps,
+                    latency_ms=e2e_latency_ms,
+                    fsm_state=current_fsm_state,
+                    current_gesture=detected_pose,
+                    is_pinched=is_pinched,
+                    is_sleeping=self.camera_stream.is_sleeping,
+                )
+                self.hud_window.update_display(annotated)
+
+            # Update the rich gesture dashboard & floating mini-HUD
+            self.hud_window.update_gesture_dashboard(
+                current_gesture=detected_pose,
+                fsm_state=current_fsm_state,
+                clutch_progress=self.fsm.clutch_progress,
+                is_pinched=is_pinched,
                 fps=self.camera_stream.current_fps,
                 latency_ms=e2e_latency_ms,
-                fsm_state=current_fsm_state,
-                current_gesture=detected_pose,
-                is_pinched=is_pinched,
-                is_sleeping=self.camera_stream.is_sleeping,
+                latest_event=event_to_dispatch,
             )
-            self.hud_window.update_display(annotated)
 
     def shutdown(self):
         print("[GestureFlow] Shutting down...")

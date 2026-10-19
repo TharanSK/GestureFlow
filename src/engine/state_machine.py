@@ -158,6 +158,21 @@ class DebounceFSM:
         """Returns True if the system is currently ARMED or in active clutch."""
         return self.state in (FSMState.ARMED, FSMState.TRIGGERED)
 
+    @property
+    def clutch_progress(self) -> float:
+        if self.state in (FSMState.ARMED, FSMState.TRIGGERED, FSMState.COOLDOWN):
+            return 1.0
+        if self.clutch_start_time is None:
+            return 0.0
+        elapsed = (time.perf_counter() * 1000.0) - self.clutch_start_time
+        return max(0.0, min(1.0, elapsed / self.clutch_time_ms))
+
+    @property
+    def trigger_progress(self) -> float:
+        if self.state == FSMState.TRIGGERED:
+            return 1.0
+        return max(0.0, min(1.0, self.candidate_frame_count / max(1, self.trigger_frames)))
+
     def reset(self):
         self.state = FSMState.IDLE
         self.clutch_start_time = None
