@@ -381,9 +381,10 @@ def main():
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
+    app.setQuitOnLastWindowClosed(True)
 
     gf = GestureFlowApp(settings_path=args.settings, keymaps_path=args.keymaps, headless=args.headless)
+    app.aboutToQuit.connect(gf.shutdown)
     gf.start()
 
     sys.exit(app.exec())

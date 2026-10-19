@@ -584,6 +584,11 @@ class HUDOverlayWindow(QMainWindow):
     def update_display(self, frame_annotated: np.ndarray):
         self.video_widget.update_frame(frame_annotated)
 
+    def closeEvent(self, event):
+        if hasattr(self, "floating_widget") and self.floating_widget:
+            self.floating_widget.close()
+        event.accept()
+
 
 def create_tray_icon() -> QIcon:
     """Generates an in-memory crisp icon pixmap for the system tray."""
