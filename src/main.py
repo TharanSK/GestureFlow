@@ -128,51 +128,63 @@ class PipelineWorker(threading.Thread):
                     landmarks_3d = hand.world_landmarks
                     norm_lm, feat_63d, _ = self.app.normalizer.normalize(landmarks_3d)
 
-                    # Palm normal & self-occlusion check (|nz| >= 0.35)
+                    # Palm normal & self-occlusion check (|nz| >= min_palm_normal_z)
                     _, is_palm_valid = self.app.normalizer.compute_palm_normal(landmarks_3d)
 
-                    # Pinch Hysteresis (tau_engage=0.22, tau_release=0.30)
-                    d_pinch = self.app.normalizer.compute_pinch_distance(norm_lm)
+                    # Pinch Hysteresis with 2D + 3D consensus
+                    d_pinch_3d = self.app.normalizer.compute_pinch_distance(norm_lm)
+                    p4_2d = hand.landmarks_norm[4][:2]
+                    p8_2d = hand.landmarks_norm[8][:2]
+                    span_2d = float(np.linalg.norm(hand.landmarks_norm[9][:2] - hand.landmarks_norm[0][:2])) + 1e-6
+                    d_pinch_2d = float(np.linalg.norm(p4_2d - p8_2d)) / span_2d
+                    d_pinch = min(d_pinch_3d, d_pinch_2d)
+
                     new_pinch = self.app.pinch_filter.update(d_pinch, is_palm_valid=is_palm_valid)
 
                     if new_pinch != is_pinched:
                         self.app.action_dispatcher.set_pinch_state(new_pinch)
                         is_pinched = new_pinch
 
-                    # Static Pose Classification (ONNX Runtime MLP)
-                    classified_pose, confidence = self.app.classifier.predict(feat_63d)
+                    # Hybrid Static Pose Classification (Geometric rules + ONNX Runtime MLP)
+                    classified_pose, confidence = self.app.classifier.predict(feat_63d, raw_landmarks=landmarks_3d)
+                    if classified_pose is None and hand.landmarks_norm is not None:
+                        classified_pose, confidence = self.app.classifier.classify_geometric(hand.landmarks_norm)
 
                     # Dynamic Swipe Trajectory (12-Frame Circular Deque)
                     swipe_token = self.app.swipe_detector.add_point(wrist_norm[0], wrist_norm[1], capture_timestamp)
 
-                    # Candidate selection
+                    # Prioritize dynamic swipes over static poses
                     candidate_token = swipe_token or classified_pose
                     detected_pose = candidate_token
 
-                    # Debounce FSM Evaluation
-                    fsm_state, event_to_dispatch = self.app.fsm.update(candidate_token, capture_timestamp)
+                    # Debounce FSM Evaluation (Direct Mode bypasses clutch requirement)
+                    fsm_state, event_to_dispatch = self.app.fsm.update(
+                        candidate_token,
+                        capture_timestamp,
+                        force_armed=self.app.direct_mode,
+                    )
                     current_fsm_state = fsm_state.name
 
                     if event_to_dispatch:
-                        print(f"[GestureFlow] Validated Gesture Triggered: {event_to_dispatch}")
+                        print(f"🔥 [GESTURE TRIGGERED] {event_to_dispatch} -> Dispatching OS action!")
                         self.app.action_dispatcher.dispatch_gesture(event_to_dispatch)
 
                     # Precision Pointer Tracking
                     screen_norm_x, screen_norm_y = self.app.roi_gate.map_to_screen_norm(index_norm[0], index_norm[1], mirror_x=False)
                     smooth_x, smooth_y = self.app.cursor_filter.filter((screen_norm_x, screen_norm_y))
 
-                    if self.app.fsm.is_active() or classified_pose == "POSE_POINTING":
+                    if self.app.direct_mode or self.app.fsm.is_active() or classified_pose == "POSE_POINTING":
                         self.app.action_dispatcher.move_cursor_norm(smooth_x, smooth_y)
 
                 else:
                     self.app.cursor_filter.reset()
                     self.app.swipe_detector.reset()
-                    self.app.fsm.update(None, capture_timestamp)
+                    self.app.fsm.update(None, capture_timestamp, force_armed=self.app.direct_mode)
 
             else:
                 self.app.cursor_filter.reset()
                 self.app.swipe_detector.reset()
-                self.app.fsm.update(None, capture_timestamp)
+                self.app.fsm.update(None, capture_timestamp, force_armed=self.app.direct_mode)
 
             # End-to-end telemetry calculation
             e2e_latency_ms = (time.perf_counter() - capture_timestamp) * 1000.0
@@ -216,6 +228,7 @@ class GestureFlowApp:
         self.settings = load_settings(settings_path)
         self.headless = headless
         self.is_paused = False
+        self.direct_mode = True  # Direct instant mode on by default!
 
         # Configuration parameters
         cam_cfg = self.settings.get("camera", {})
@@ -233,11 +246,11 @@ class GestureFlowApp:
         self.roi_y_max = roi_cfg.get("y_max", 0.80)
 
         norm_cfg = self.settings.get("normalizer", {})
-        self.min_palm_normal_z = norm_cfg.get("min_palm_normal_z", 0.35)
+        self.min_palm_normal_z = norm_cfg.get("min_palm_normal_z", 0.20)
 
         hys_cfg = self.settings.get("hysteresis", {})
-        self.pinch_engage = hys_cfg.get("pinch_engage_threshold", 0.22)
-        self.pinch_release = hys_cfg.get("pinch_release_threshold", 0.30)
+        self.pinch_engage = hys_cfg.get("pinch_engage_threshold", 0.26)
+        self.pinch_release = hys_cfg.get("pinch_release_threshold", 0.35)
 
         cur_cfg = self.settings.get("cursor", {})
         self.alpha_min = cur_cfg.get("alpha_min", 0.15)
@@ -304,7 +317,8 @@ class GestureFlowApp:
             self.hud_window = HUDOverlayWindow()
             self.tray_manager = SystemTrayManager()
 
-            # Wire tray signals
+            # Wire UI and tray signals
+            self.hud_window.toggle_mode_btn.clicked.connect(self._toggle_direct_mode)
             self.tray_manager.toggle_hud_requested.connect(self._toggle_hud)
             self.tray_manager.toggle_floating_requested.connect(self.hud_window._toggle_floating_widget)
             self.tray_manager.pause_resume_requested.connect(self._toggle_pause)
@@ -321,6 +335,25 @@ class GestureFlowApp:
             self.timer = QTimer()
             self.timer.timeout.connect(self._ui_tick)
             self.timer.start(33)
+
+    def _toggle_direct_mode(self):
+        self.direct_mode = not self.direct_mode
+        if self.direct_mode:
+            self.hud_window.toggle_mode_btn.setText("⚡ Mode: Direct (Instant)")
+            self.hud_window.toggle_mode_btn.setStyleSheet(
+                "QPushButton { background: #1B3A2B; color: #00E676; border: 1px solid #00C853; "
+                "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: bold; }"
+                "QPushButton:hover { background: #25523B; }"
+            )
+            print("[GestureFlow] Mode switched to: DIRECT (Instant Gestures)")
+        else:
+            self.hud_window.toggle_mode_btn.setText("🛡️ Mode: Clutch (400ms)")
+            self.hud_window.toggle_mode_btn.setStyleSheet(
+                "QPushButton { background: #2E2818; color: #FFB300; border: 1px solid #FFA000; "
+                "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: bold; }"
+                "QPushButton:hover { background: #3E3520; }"
+            )
+            print("[GestureFlow] Mode switched to: CLUTCH (Requires 400ms Open Palm)")
 
     def _toggle_hud(self):
         if self.hud_window:

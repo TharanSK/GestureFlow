@@ -23,7 +23,7 @@ class LandmarkNormalizer:
     THUMB_TIP_IDX = 4
     INDEX_TIP_IDX = 8
 
-    def __init__(self, epsilon: float = 1e-6, min_palm_normal_z: float = 0.35):
+    def __init__(self, epsilon: float = 1e-6, min_palm_normal_z: float = 0.20):
         self.epsilon = epsilon
         self.min_palm_normal_z = min_palm_normal_z
 

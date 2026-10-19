@@ -317,6 +317,14 @@ class HUDOverlayWindow(QMainWindow):
 
         # Under-camera controls
         controls_bar = QHBoxLayout()
+        self.toggle_mode_btn = QPushButton("⚡ Mode: Direct (Instant)")
+        self.toggle_mode_btn.setStyleSheet(
+            "QPushButton { background: #1B3A2B; color: #00E676; border: 1px solid #00C853; "
+            "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: bold; }"
+            "QPushButton:hover { background: #25523B; }"
+        )
+        controls_bar.addWidget(self.toggle_mode_btn)
+
         self.toggle_mini_btn = QPushButton("📌 Show Floating Mini-Display")
         self.toggle_mini_btn.setStyleSheet(
             "QPushButton { background: #262635; color: #D0D0FF; border: 1px solid #3E3E55; "
