@@ -20,6 +20,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import yaml
 import numpy as np
 import cv2
@@ -166,7 +173,7 @@ class PipelineWorker(threading.Thread):
                     current_fsm_state = fsm_state.name
 
                     if event_to_dispatch:
-                        print(f"🔥 [GESTURE TRIGGERED] {event_to_dispatch} -> Dispatching OS action!")
+                        print(f"[GESTURE TRIGGERED] {event_to_dispatch} -> Dispatching OS action!")
                         self.app.action_dispatcher.dispatch_gesture(event_to_dispatch)
 
                     # Precision Pointer Tracking
@@ -224,9 +231,10 @@ class GestureFlowApp:
     Main application engine coordinating the 4-stage pipeline and managing the PyQt6 UI.
     """
 
-    def __init__(self, settings_path: str = "config/settings.yaml", keymaps_path: str = "config/default_keymaps.json", headless: bool = False):
+    def __init__(self, settings_path: str = "config/settings.yaml", keymaps_path: str = "config/default_keymaps.json", headless: bool = False, show_opencv: bool = False):
         self.settings = load_settings(settings_path)
         self.headless = headless
+        self.show_opencv = show_opencv
         self.is_paused = False
         self.direct_mode = True  # Direct instant mode on by default!
 
@@ -329,6 +337,16 @@ class GestureFlowApp:
             self.hud_window.show()
             self.hud_window.raise_()
             self.hud_window.activateWindow()
+
+            # Ensure window is restored and forced to the foreground on Windows
+            try:
+                import ctypes
+                hwnd = int(self.hud_window.winId())
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+
             print("[GestureFlow] Dashboard window is now visible on screen.")
 
             # Non-blocking 30 FPS UI refresh timer (33ms)
@@ -375,15 +393,23 @@ class GestureFlowApp:
         Non-blocking UI refresh loop running on the Qt thread.
         Simply reads the latest rendered frame and telemetry from the background worker.
         """
-        if not self.worker or not self.hud_window:
+        if not self.worker:
             return
 
         frame, telemetry = self.worker.get_latest_data()
 
-        if frame is not None and self.hud_window.isVisible():
+        if frame is not None and self.hud_window and self.hud_window.isVisible():
             self.hud_window.update_display(frame)
 
-        if telemetry:
+        if self.show_opencv and frame is not None:
+            try:
+                import cv2
+                cv2.imshow("GestureFlow - Live Camera Preview", frame)
+                cv2.waitKey(1)
+            except Exception:
+                pass
+
+        if telemetry and self.hud_window:
             self.hud_window.update_gesture_dashboard(
                 current_gesture=telemetry.get("current_gesture"),
                 fsm_state=telemetry.get("fsm_state", "IDLE"),
@@ -403,6 +429,12 @@ class GestureFlowApp:
         self.camera_stream.stop()
         self.action_dispatcher.cleanup()
         self.hand_tracker.close()
+        if self.show_opencv:
+            try:
+                import cv2
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
         QApplication.quit()
 
 
@@ -411,12 +443,18 @@ def main():
     parser.add_argument("--settings", default="config/settings.yaml", help="Path to settings.yaml")
     parser.add_argument("--keymaps", default="config/default_keymaps.json", help="Path to default_keymaps.json")
     parser.add_argument("--headless", action="store_true", help="Run without PyQt6 GUI/HUD")
+    parser.add_argument("--opencv", action="store_true", help="Also display native OpenCV preview window")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
 
-    gf = GestureFlowApp(settings_path=args.settings, keymaps_path=args.keymaps, headless=args.headless)
+    gf = GestureFlowApp(
+        settings_path=args.settings,
+        keymaps_path=args.keymaps,
+        headless=args.headless,
+        show_opencv=args.opencv,
+    )
     app.aboutToQuit.connect(gf.shutdown)
     gf.start()
 
