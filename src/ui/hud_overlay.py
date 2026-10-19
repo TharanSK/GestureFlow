@@ -291,6 +291,9 @@ class HUDOverlayWindow(QMainWindow):
         self.resize(1020, 560)
         self.setStyleSheet("QMainWindow { background-color: #121218; }")
 
+        # Always on top by default so it immediately floats above VS Code / Browser
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+
         # Center on primary screen
         screen = QApplication.primaryScreen()
         if screen:
@@ -325,7 +328,16 @@ class HUDOverlayWindow(QMainWindow):
         )
         controls_bar.addWidget(self.toggle_mode_btn)
 
-        self.toggle_mini_btn = QPushButton("📌 Show Floating Mini-Display")
+        self.toggle_pin_btn = QPushButton("📌 Pin: Always on Top")
+        self.toggle_pin_btn.setStyleSheet(
+            "QPushButton { background: #1B2B3A; color: #00B0FF; border: 1px solid #0091EA; "
+            "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; }"
+            "QPushButton:hover { background: #253B50; }"
+        )
+        self.toggle_pin_btn.clicked.connect(self._toggle_pin)
+        controls_bar.addWidget(self.toggle_pin_btn)
+
+        self.toggle_mini_btn = QPushButton("🪟 Floating Mini-Display")
         self.toggle_mini_btn.setStyleSheet(
             "QPushButton { background: #262635; color: #D0D0FF; border: 1px solid #3E3E55; "
             "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; }"
@@ -451,13 +463,31 @@ class HUDOverlayWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         self.recent_events: deque = deque(maxlen=3)
 
+    def _toggle_pin(self):
+        is_on_top = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        if is_on_top:
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
+            self.toggle_pin_btn.setText("📌 Pin: Normal Window")
+            self.toggle_pin_btn.setStyleSheet(
+                "QPushButton { background: #262635; color: #AAA; border: 1px solid #444; "
+                "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; }"
+            )
+        else:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+            self.toggle_pin_btn.setText("📌 Pin: Always on Top")
+            self.toggle_pin_btn.setStyleSheet(
+                "QPushButton { background: #1B2B3A; color: #00B0FF; border: 1px solid #0091EA; "
+                "padding: 6px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; }"
+            )
+        self.show()
+
     def _toggle_floating_widget(self):
         if self.floating_widget.isVisible():
             self.floating_widget.hide()
-            self.toggle_mini_btn.setText("📌 Show Floating Mini-Display")
+            self.toggle_mini_btn.setText("🪟 Show Floating Mini-Display")
         else:
             self.floating_widget.show()
-            self.toggle_mini_btn.setText("📌 Hide Floating Mini-Display")
+            self.toggle_mini_btn.setText("🪟 Hide Floating Mini-Display")
 
     def draw_telemetry_on_frame(
         self,
